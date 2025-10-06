@@ -1,0 +1,550 @@
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;600;700&display=swap');
+
+:root {
+  --cream-bg-start: #fff8e1;
+  --cream-bg-end: #fef3c7;
+  --card-bg: #ffffffcc;
+  --accent: #16a34a;
+  --text-dark: #222;
+}
+
+body {
+  margin: 0;
+  font-family: "Poppins", sans-serif;
+  background: linear-gradient(180deg, var(--cream-bg-start), var(--cream-bg-end));
+  min-height: 100vh;
+  overflow-x: hidden;
+  position: relative;
+}
+
+/* Stickers */
+.sticker {
+  position: fixed;
+  z-index: 1;
+  width: 80px;
+  height: auto;
+}
+
+.sticker.bottom-left { bottom: 20px; left: 20px; }
+.sticker.bottom-right { bottom: 20px; right: 30px; }
+.sticker.top-right { top: 20px; right: 20px; width: 70px; }
+.sticker.mid-right { top: 45%; right: 25px; width: 90px; transform: translateY(-50%); }
+
+/* App shell */
+.app-shell {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 40px 20px;
+  position: relative;
+  z-index: 2;
+}
+
+/* Header */
+.header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  width: 85%;
+  background: rgba(255, 255, 255, 0.6);
+  backdrop-filter: blur(6px);
+  border-radius: 16px;
+  padding: 16px 28px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.1);
+}
+
+.header h1 {
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--text-dark);
+}
+
+.header a {
+  font-weight: 600;
+  color: var(--text-dark);
+  text-decoration: none;
+  border-bottom: 2px solid transparent;
+  transition: all 0.3s ease;
+}
+
+.header a:hover {
+  border-bottom: 2px solid var(--accent);
+}
+
+/* Upload Card */
+.ui-card {
+  margin-top: 60px;
+  background: var(--card-bg);
+  border-radius: 20px;
+  padding: 40px;
+  width: 80%;
+  max-width: 900px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.15);
+  backdrop-filter: blur(8px);
+}
+
+.ui-card h2 {
+  font-size: 20px;
+  font-weight: 600;
+  margin-bottom: 12px;
+}
+
+.ui-card input[type="file"] {
+  display: inline-block;
+  font-size: 15px;
+  margin-top: 12px;
+  border: 2px dashed #ddd;
+  padding: 10px;
+  border-radius: 10px;
+  width: 70%;
+  cursor: pointer;
+  transition: all 0.3s ease;
+}
+
+.ui-card input[type="file"]:hover {
+  border-color: var(--accent);
+}
+
+.btn-map {
+  background: var(--accent);
+  color: white;
+  border: none;
+  border-radius: 10px;
+  padding: 10px 24px;
+  font-weight: 600;
+  margin-left: 20px;
+  cursor: pointer;
+  box-shadow: 0 6px 14px rgba(22, 163, 74, 0.25);
+  transition: transform 0.2s ease;
+}
+
+.btn-map:hover {
+  transform: translateY(-2px);
+}
+
+footer {
+  margin-top: 60px;
+  font-size: 13px;
+  color: #444;
+  opacity: 0.7;
+}
+/* Right photo panel — balanced width and clean layout */
+.photo-panel {
+  width: 280px;                    /* reduced from 360px */
+  flex: 0 0 280px;                 /* fixed width */
+  margin-right: 20px;              /* smaller outer spacing */
+  position: relative;
+}
+
+.photo-panel .photo-card {
+  position: sticky;
+  top: 96px;
+  height: 420px;                   /* fixed height for clean proportion */
+  border-radius: 16px;
+  overflow: hidden;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  box-shadow: 0 10px 25px rgba(0, 0, 0, 0.25);
+  background: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* Maintain image quality and avoid stretching */
+.photo-panel .photo-card img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;               /* crops without distortion */
+  image-rendering: -webkit-optimize-contrast; /* improves clarity on retina */
+  filter: saturate(1.05) contrast(1.05);
+  transition: transform 0.5s ease-in-out;
+}
+
+/* Subtle zoom on hover (optional, looks classy) */
+.photo-panel .photo-card:hover img {
+  transform: scale(1.03);
+}
+
+/* Two-column layout wrapper */
+.content-wrapper {
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  width: 100%;
+  max-width: 1300px;
+  margin: 0 auto;
+  gap: 40px;
+}
+.app-main {
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  gap: 80px; /* controls spacing between left content and photo panel */
+  padding: 40px 60px;
+  flex-wrap: nowrap; /* ensures they stay side by side */
+  position: relative;
+}
+
+/* left content column */
+.content-col {
+  flex: 1;
+  max-width: 850px;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+/* photo panel on right side */
+.photo-panel {
+  position: sticky;
+  top: 120px;
+  flex: 0 0 360px;
+  height: 500px;
+  border-radius: 18px;
+  overflow: hidden;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.25);
+  background: white;
+}
+
+.photo-panel .photo-card {
+  width: 100%;
+  height: 100%;
+}
+
+.photo-panel img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+
+/* ===== StickerField styles (append to App.css) ===== */
+
+.sticker-field {
+  pointer-events: none; /* never interfere with clicks */
+  position: fixed;
+  inset: 0; /* full viewport */
+  z-index: 0; /* behind normal app content (ensure your content uses >0 z-index) */
+  overflow: visible;
+}
+
+/* Each sticker is absolutely positioned inside the field */
+.sticker {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 12%;
+  will-change: transform, opacity;
+  /* subtle blend so stickers integrate with dark BG */
+  mix-blend-mode: screen;
+  filter: saturate(1.02) contrast(1.02);
+  transition: transform 0.25s ease;
+  /* use the float animation defined below */
+  animation-name: sticker-float;
+  animation-timing-function: ease-in-out;
+  animation-iteration-count: infinite;
+}
+
+/* if image used */
+.sticker img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+  border-radius: 8px;
+  box-shadow: 0 6px 22px rgba(0,0,0,0.45);
+}
+
+/* emoji / text sticker */
+.sticker-emoji {
+  font-size: clamp(18px, 3.4vw, 48px);
+  /* scale with container */
+  transform-origin: center;
+  display: inline-block;
+  line-height: 1;
+}
+
+/* The float animation: cross-fade of subtle drifting translations + rotation */
+@keyframes sticker-float {
+  0% {
+    transform: translate(-50%, -50%) translate3d(calc(var(--drift-x) * -0.4), calc(var(--drift-y) * -0.4), 0) rotate(0deg) scale(1);
+    opacity: 0.92;
+    filter: blur(0px);
+  }
+  25% {
+    transform: translate(-50%, -50%) translate3d(calc(var(--drift-x) * 0.35), calc(var(--drift-y) * 0.15), 0) rotate(2deg) scale(1.02);
+    opacity: 0.98;
+  }
+  50% {
+    transform: translate(-50%, -50%) translate3d(calc(var(--drift-x) * -0.18), calc(var(--drift-y) * 0.3), 0) rotate(-1deg) scale(0.99);
+    opacity: 0.92;
+  }
+  75% {
+    transform: translate(-50%, -50%) translate3d(calc(var(--drift-x) * 0.1), calc(var(--drift-y) * -0.34), 0) rotate(1deg) scale(1.01);
+    opacity: 0.97;
+  }
+  100% {
+    transform: translate(-50%, -50%) translate3d(calc(var(--drift-x) * -0.4), calc(var(--drift-y) * -0.4), 0) rotate(0deg) scale(1);
+    opacity: 0.92;
+  }
+}
+
+/* responsive tweaks: reduce sticker intensity on small screens */
+@media (max-width: 1000px) {
+  .sticker { opacity: 0.75; }
+}
+@media (max-width: 680px) {
+  .sticker { display: none; } /* hide stickers on very small screens for readability & perf */
+}
+
+/* Results page layout & card styling */
+.results-page {
+  position: relative;
+  min-height: 100vh;
+  background: linear-gradient(180deg, #fff7e6 0%, #fff5dc 100%); /* soft cream */
+  padding: 36px 20px;
+  box-sizing: border-box;
+}
+
+/* sticker layer (fixed behind everything) */
+
+
+/* main content sits above stickers */
+.results-main {
+  position: relative;
+  z-index: 2;
+  max-width: 1100px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+/* header */
+.results-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  justify-content: flex-start;
+  padding: 18px 22px;
+  border-radius: 14px;
+  background: #fff;
+  box-shadow: 0 10px 24px rgba(20,20,20,0.08);
+}
+.results-header h1 {
+  margin: 0;
+  font-size: 20px;
+}
+.back-link {
+  margin-left: auto;
+  text-decoration: none;
+  color: #333;
+  font-weight: 600;
+}
+
+/* main card */
+.results-card {
+  padding: 24px;
+  border-radius: 16px;
+  background: rgba(255,255,255,0.9);
+  box-shadow: 0 18px 40px rgba(30,30,30,0.06);
+}
+
+/* grid layout: left macros, right micronutrients */
+.results-grid {
+  display: grid;
+  grid-template-columns: 360px 1fr;
+  gap: 28px;
+  align-items: start;
+}
+
+/* responsive */
+@media (max-width: 900px) {
+  .results-grid { grid-template-columns: 1fr; }
+  .results-main { padding: 12px; }
+}
+
+/* table styles */
+.macros-table, .nutrients-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 14px;
+}
+.macros-table td, .nutrients-table td {
+  padding: 6px 8px;
+  vertical-align: top;
+}
+.macros-table td:first-child, .nutrients-table td:first-child { font-weight: 600; color: #222; }
+.nutrients-table thead th { text-align:left; padding-bottom: 8px; color:#333; font-weight:700; }
+
+/* small helper card */
+.card { background: #fff; border-radius: 12px; }
+
+/* center empty placeholder */
+.center-empty { padding: 48px; text-align: center; }
+
+/* ensure stickers are behind the UI */
+.results-page .sticker {
+  opacity: 0.95;
+  mix-blend-mode: normal;
+}
+
+
+/* ---------- SLIDESHOW (no blur) ---------- */
+.photo-slideshow.no-blur {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  border-radius: 20px;
+  background: radial-gradient(circle at 30% 30%, #fefcf5, #f9f2df);
+  box-shadow: 0 10px 25px rgba(0, 0, 0, 0.06);
+  z-index: 1; /* slideshow sits below stickers */
+}
+
+.slide-image {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  filter: brightness(0.92) saturate(1.1);
+  transition: transform 18s ease-in-out, opacity 1.2s ease;
+  transform: scale(1.04);
+  will-change: transform;
+}
+
+/* Ken Burns slow animation */
+.slide-image.animate {
+  animation: kenburns 18s ease-in-out infinite alternate;
+}
+@keyframes kenburns {
+  0%   { transform: scale(1.04) translate(0,0); }
+  100% { transform: scale(1.09) translate(-1.5%,-1.5%); }
+}
+
+/* subtle parallax glow behind stickers */
+.parallax-layer {
+  position: absolute;
+  top: -12%;
+  left: -12%;
+  right: -12%;
+  bottom: -12%;
+  z-index: 1;
+  pointer-events: none;
+  background: radial-gradient(rgba(255,255,255,0.09), transparent 60%);
+  mix-blend-mode: normal;
+  opacity: 0.9;
+  animation: floatGlow 14s ease-in-out infinite;
+}
+@keyframes floatGlow {
+  0% { transform: translate(0px,0px) scale(1); }
+  50% { transform: translate(6px,-4px) scale(1.03); }
+  100% { transform: translate(0px,0px) scale(1); }
+}
+
+/* ---------- STICKER LAYER (ensure it sits above slideshow) ---------- */
+/* stickerfield-layer is the StickerField root class from earlier replacement */
+.stickerfield-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 2;           /* stickers above slideshow (z:1) but below main UI (z:3) */
+  pointer-events: none;
+  overflow: hidden;
+}
+
+/* sticker element styling */
+.sticker {
+  will-change: transform, opacity;
+  filter: drop-shadow(0 8px 18px rgba(0,0,0,0.09));
+}
+
+/* optional: make png stickers blend softly with slideshow */
+.sticker-png {
+  mix-blend-mode: screen;  /* try 'screen' or 'soft-light' — toggle to taste */
+  opacity: 0.95;
+}
+
+/* ---------- MAIN APP CONTENT ---------- */
+/* ensure main UI sits on top of both slideshow and stickers */
+.app-main, .results-main, .content-col {
+  position: relative;
+  z-index: 3; /* highest */
+}
+/* Results page centering and layout */
+.results-main.centered {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 32px 24px;
+}
+
+.results-header {
+  width: 100%;
+  max-width: 1100px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 18px 22px;
+}
+
+.results-card {
+  width: 100%;
+  max-width: 1100px;
+  border-radius: 12px;
+  padding: 20px;
+  box-shadow: 0 10px 25px rgba(14, 30, 37, 0.06);
+  background: #fff;
+}
+
+/* macros/nutrients */
+.macros-table td {
+  padding: 10px 8px;
+  vertical-align: middle;
+}
+.nutrients-table.compact td {
+  padding: 6px 8px;
+}
+
+/* per-item provenance visuals */
+.prov-row {
+  padding: 10px 8px;
+  border-bottom: 1px solid #f4f4f4;
+}
+.prov-title { font-weight: 600; }
+.prov-meta { font-size: 13px; color: #666; margin-top: 6px; }
+
+/* percent dv rows */
+.percent-dv .percent-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 0;
+  border-bottom: 1px solid #f7f7f7;
+}
+.percent-dv .percent-left { flex: 1; }
+.percent-dv .percent-value { font-size: 13px; color: #666; margin-top: 4px; }
+.legend { margin-top: 8px; font-size: 13px; color: #444; }
+
+/* places */
+.place-row { padding: 10px 6px; border-bottom: 1px dashed #eee; margin-bottom: 6px; }
+.place-name { font-weight: 600; }
+
+/* stickers layer behind content */
+.sticky-stickers {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  overflow: hidden;
+}
+.results-main, .results-card, .results-header { position: relative; z-index: 2; }
+
+/* small helpers */
+.center-empty { max-width: 720px; margin: 24px auto; text-align: center; padding: 30px; }
+.muted { color: #666; }
+.btn { cursor: pointer; }
+.btn.btn-ghost { background: #667747; border: 1px solid #eee; padding: 8px 12px; border-radius: 8px; }
+.loader { padding: 24px; text-align: center; }
+.error { color: #a33; background: #fff1f1; padding: 8px; border-radius: 8px; margin-bottom: 10px; }
