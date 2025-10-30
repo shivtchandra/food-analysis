@@ -1,498 +1,493 @@
-# backend/app.py
-import os
-import shutil
-import traceback
-import logging
-import time
-from pathlib import Path
-from typing import Dict, Any, Optional, Tuple, List
+"""
+Combined FastAPI backend + AI microservice logic.
+Run with: uvicorn app_combined:app --reload --port 8000
+Environment:
+ - GEMINI_API_KEY (optional)
+ - GEMINI_MODEL (optional, default gemini-2.5-flash)
+ - SERPAPI_API_KEY (optional)
+ - SAVE_TO_FIRESTORE = "1" to enable Firestore (optional)
+"""
 
-import pandas as pd
-from fastapi import FastAPI, UploadFile, File, Body, Query
+import os, re, json, math, time, random, datetime, traceback, logging
+from typing import Dict, Any, List, Optional
+from functools import lru_cache
+
+from fastapi import FastAPI, UploadFile, File, Body, Query, Depends, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from dotenv import load_dotenv
 
-# local modules (must exist)
-from fdc_utils import lookup_food_nutrients, search_food, get_food_by_fdcid
-from image_utils import map_items_from_image_bytes
-from fda_daily_values import FDA_DV
+from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, JSON, ForeignKey
+from sqlalchemy.orm import sessionmaker, declarative_base, relationship
 
-# optional CSV analyzer
-try:
-    from nutrition_utils import analyze_orders
-except Exception:
-    analyze_orders = None
-
-# config
-DEBUG = True
-DATA_DIR = os.path.dirname(__file__) or "."
-INDIAN_DB_PATH = os.path.join(DATA_DIR, 'indian_food_db.csv')
-
+# === Logging ===
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("food-analysis")
 
-app = FastAPI(title="Food Analysis API")
+# === Local cache ===
+LOCAL_FOOD_CACHE = []
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000", "*"] if DEBUG else ["https://your.prod.domain"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+def _normalize_name(s: str) -> str:
+    return re.sub(r"[^a-z0-9 ]+", "", (s or "").lower())
 
-# JSON sanitizer
-import math
-import numpy as _np
+def load_local_foods(path="foods_data.json"):
+    global LOCAL_FOOD_CACHE
+    LOCAL_FOOD_CACHE = []
+    if not os.path.exists(path):
+        logger.warning("No local foods file found at %s", path)
+        return
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    for item in data:
+        name = item.get("food_name") or item.get("description") or ""
+        if not name:
+            continue
+        nutrients = {}
+        for k,v in item.items():
+            kl = k.lower()
+            if "energy" in kl or "calorie" in kl:
+                nutrients["calories_kcal"] = float(v)
+            elif "protein" in kl:
+                nutrients["protein_g"] = float(v)
+            elif "carbohydrate" in kl or "carbs" in kl:
+                nutrients["total_carbohydrate_g"] = float(v)
+            elif "fat" in kl and "saturated" not in kl:
+                nutrients["total_fat_g"] = float(v)
+        LOCAL_FOOD_CACHE.append({
+            "name": name.strip(),
+            "norm": _normalize_name(name),
+            "nutrients": nutrients,
+        })
+    logger.info(f"✅ Loaded {len(LOCAL_FOOD_CACHE)} local food entries")
 
-def _sanitize_value(v):
-    if isinstance(v, (_np.integer,)):
-        return int(v)
-    if isinstance(v, (_np.floating,)):
-        fv = float(v)
-        if not math.isfinite(fv):
-            return None
-        return fv
-    if isinstance(v, _np.ndarray):
-        return [_sanitize_value(x) for x in v.tolist()]
-    if isinstance(v, float):
-        if not math.isfinite(v):
-            return None
-        return v
-    if isinstance(v, (int, str, bool, type(None))):
-        return v
+load_local_foods(os.path.join(os.path.dirname(__file__), "foods_data.json"))
+
+@lru_cache(maxsize=2048)
+def find_local_food(name: str, threshold: int = 75):
+    if not name or not LOCAL_FOOD_CACHE:
+        return None
+    q = _normalize_name(name)
+    best, best_score = None, 0
+    for e in LOCAL_FOOD_CACHE:
+        if e["norm"] == q:
+            return {**e, "score": 100}
+        if q in e["norm"] or e["norm"] in q:
+            s = 85
+            if s > best_score:
+                best_score, best = s, e
     try:
-        if hasattr(v, "item"):
-            item = v.item()
-            return _sanitize_value(item)
+        from rapidfuzz import fuzz
+        for e in LOCAL_FOOD_CACHE:
+            sc = int(fuzz.token_set_ratio(q, e["norm"]))
+            if sc > best_score:
+                best_score, best = sc, e
     except Exception:
         pass
+    if best and best_score >= threshold:
+        return {**best, "score": best_score}
     return None
 
-def sanitize_for_json(obj):
-    if isinstance(obj, dict):
-        return {k: sanitize_for_json(v) for k, v in obj.items()}
-    if isinstance(obj, list):
-        return [sanitize_for_json(x) for x in obj]
-    return _sanitize_value(obj)
+# === AI optional ===
+import requests
+load_dotenv()
+try:
+    import google.generativeai as genai
+except Exception:
+    genai = None
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+if GEMINI_API_KEY and genai:
+    genai.configure(api_key=GEMINI_API_KEY)
+    logger.info("Gemini configured")
+else:
+    logger.warning("Gemini unavailable")
+
+# === FastAPI ===
+app = FastAPI(title="Food Analysis API (Offline + AI)")
+app.add_middleware(
+    CORSMiddleware, allow_origins=["*"], allow_credentials=True,
+    allow_methods=["*"], allow_headers=["*"],
+)
+
+def _is_number(v):
+    try: float(v); return True
+    except: return False
 
 def json_error(msg, exc=None):
     payload = {"error": msg}
-    if DEBUG and exc is not None:
-        payload["traceback"] = traceback.format_exc()
+    if exc: payload["traceback"] = traceback.format_exc()
     return JSONResponse(status_code=500, content=payload)
 
+# === Nutrient endpoint ===
+# === Main nutrient endpoint (fixed order + closest-match fallback) ===
+from typing import Tuple
+try:
+    from rapidfuzz import fuzz
+except Exception:
+    fuzz = None
 
-@app.get("/sample/")
-def sample():
-    return {"status":"ok","msg":"Use POST /analyze/ or /analyze_image_with_micronutrients/ to analyze."}
-
-
-# -----------------------
-# Micronutrient helpers
-# -----------------------
-def _as_float(x) -> Optional[float]:
-    try:
-        if x is None:
-            return None
-        return float(x)
-    except Exception:
+def _closest_local_food(name: str, min_score: int = 60) -> Optional[Dict[str, Any]]:
+    """Pick the best local match even if find_local_food() fails the threshold."""
+    if not LOCAL_FOOD_CACHE:
         return None
-
-def scale_nutrients(nutrients: Dict[str, Any], multiplier: float) -> Dict[str, float]:
-    out = {}
-    for k, v in (nutrients or {}).items():
-        fv = _as_float(v)
-        if fv is None:
-            continue
-        out[k] = fv * multiplier
-    return out
-
-def merge_totals(agg: Dict[str, float], add: Dict[str, float]) -> Dict[str, float]:
-    for k, v in (add or {}).items():
-        if v is None:
-            continue
-        try:
-            agg[k] = agg.get(k, 0.0) + float(v)
-        except Exception:
-            pass
-    return agg
-
-def compute_item_macros(nutrients: Dict[str, Any]) -> Dict[str, Optional[float]]:
-    get = lambda key: _as_float(nutrients.get(key)) if nutrients else None
-    calories = get("calories_kcal")
-    protein = get("protein_g")
-    carbs = get("total_carbohydrate_g") or get("total_carbohydrate")
-    fat = get("total_fat_g") or get("fat") or get("fat_g")
-    fiber = get("dietary_fiber_g") or get("fiber_g") or get("fiber")
-    sugars = get("sugars_g") or get("sugars") or get("sugar_g")
-
-    if calories is None and any(x is not None for x in (protein, carbs, fat)):
-        p = protein or 0.0
-        c = carbs or 0.0
-        f = fat or 0.0
-        calories = p * 4.0 + c * 4.0 + f * 9.0
-
-    return {
-        "calories_kcal": calories,
-        "protein_g": protein,
-        "total_carbohydrate_g": carbs,
-        "total_fat_g": fat,
-        "dietary_fiber_g": fiber,
-        "sugars_g": sugars
-    }
-
-def build_macros_summary_from_totals(micronutrient_totals: Dict[str, float]) -> Dict[str, Optional[int]]:
-    def to_int(x):
-        try:
-            if x is None:
-                return None
-            return int(round(float(x)))
-        except Exception:
-            return None
-    return {
-        "total_calories": to_int(micronutrient_totals.get("calories_kcal")),
-        "total_protein": to_int(micronutrient_totals.get("protein_g")),
-        "total_carbs": to_int(micronutrient_totals.get("total_carbohydrate_g")),
-        "total_fat": to_int(micronutrient_totals.get("total_fat_g")),
-        "total_fiber": to_int(micronutrient_totals.get("dietary_fiber_g")),
-        "total_sugar": to_int(micronutrient_totals.get("sugars_g") or micronutrient_totals.get("sugar_g"))
-    }
-
-# --- NEW: smarter key-finding & unit conversion for %DV computation ---
-def _unit_to_base(unit_str: Optional[str]) -> Optional[str]:
-    if not unit_str:
-        return None
-    u = unit_str.lower()
-    if u in ("g","gram","grams"):
-        return "g"
-    if u in ("mg","milligram","milligrams"):
-        return "mg"
-    if u in ("mcg","μg","microgram","micrograms"):
-        return "mcg"
-    if u in ("kcal","calories","cal"):
-        return "kcal"
-    return u
-
-def _convert_value_to_target(value: float, from_unit: Optional[str], to_unit: Optional[str]) -> Optional[float]:
-    if value is None:
-        return None
-    fu = _unit_to_base(from_unit)
-    tu = _unit_to_base(to_unit)
-    try:
-        if fu == tu or tu is None or fu is None:
-            return float(value)
-        # mcg <-> mg
-        if fu in ("mcg", "μg") and tu == "mg":
-            return float(value) / 1000.0
-        if fu == "mg" and tu in ("mcg", "μg"):
-            return float(value) * 1000.0
-        # g <-> mg
-        if fu == "g" and tu == "mg":
-            return float(value) * 1000.0
-        if fu == "mg" and tu == "g":
-            return float(value) / 1000.0
-        return float(value)
-    except Exception:
-        return None
-
-def find_best_nutrient_key(target_key: str, available: Dict[str, float]) -> Optional[Tuple[str, float]]:
-    if not available:
-        return None
-    if target_key in available:
-        return target_key, available[target_key]
-
-    base = target_key
-    for suffix in ("_mg", "_mcg", "_g", "_kcal", "_RAE", "_NE"):
-        if base.endswith(suffix):
-            base = base[: -len(suffix)]
-    base = base.lower()
-
-    for k in available.keys():
-        k_lower = k.lower()
-        if k_lower == base:
-            return k, available[k]
-        if k_lower.startswith(base + "_"):
-            return k, available[k]
-    for k in available.keys():
-        if base in k.lower():
-            return k, available[k]
+    q = _normalize_name(name)
+    best, best_score = None, 0
+    # quick substring pass
+    for e in LOCAL_FOOD_CACHE:
+        if q in e["norm"] or e["norm"] in q:
+            sc = 85
+            if sc > best_score:
+                best, best_score = e, sc
+    # fuzzy pass if available
+    if fuzz:
+        for e in LOCAL_FOOD_CACHE:
+            sc = int(fuzz.token_set_ratio(q, e["norm"]))
+            if sc > best_score:
+                best, best_score = e, sc
+    if best and best_score >= min_score:
+        return {**best, "score": best_score}
     return None
 
-def compute_percent_dv(micronutrient_totals: Dict[str, float]) -> Dict[str, Optional[float]]:
-    out = {}
-    if not isinstance(micronutrient_totals, dict):
-        return out
+@app.post("/api/run_nutrients")
+async def run_nutrients(payload: Dict[str, Any] = Body(...)):
+    try:
+        items = payload.get("items") or []
+        results: List[Dict[str, Any]] = []
+        totals: Dict[str, float] = {}
 
-    for dv_key, dv_value in (FDA_DV or {}).items():
-        try:
-            match = find_best_nutrient_key(dv_key, micronutrient_totals)
-            if match:
-                found_key, found_val = match
-                from_unit = None
-                if found_key.endswith("_mg"):
-                    from_unit = "mg"
-                elif found_key.endswith("_mcg"):
-                    from_unit = "mcg"
-                elif found_key.endswith("_g"):
-                    from_unit = "g"
-                elif found_key.endswith("_kcal"):
-                    from_unit = "kcal"
-
-                target_unit = None
-                if dv_key.endswith("_mg"):
-                    target_unit = "mg"
-                elif dv_key.endswith("_mcg"):
-                    target_unit = "mcg"
-                elif dv_key.endswith("_g"):
-                    target_unit = "g"
-                elif dv_key.endswith("_kcal"):
-                    target_unit = "kcal"
-
-                val_converted = _convert_value_to_target(_as_float(found_val), from_unit, target_unit)
-                if val_converted is None:
-                    out[dv_key] = None
-                else:
-                    pct = (float(val_converted) / float(dv_value)) * 100.0 if dv_value else None
-                    out[dv_key] = None if pct is None else round(pct, 1)
+        for i, it in enumerate(items):
+            # --- READ & SANITIZE INPUTS FIRST ---
+            if isinstance(it, dict):
+                name_raw = it.get("name", "")
+                qty = it.get("quantity", 1)
+                portion_mult = it.get("portion_mult", 1.0)
             else:
-                out[dv_key] = None
-        except Exception:
-            out[dv_key] = None
-    return out
+                name_raw = str(it)
+                qty, portion_mult = 1, 1.0
 
-# Friendly DV classification for UI
-def classify_percent_dv(pct: Optional[float]):
-    if pct is None:
-        return {"pct": None, "category": "unknown", "label": "No data", "advice": "No data available."}
-    if pct >= 20:
-        return {"pct": pct, "category": "high", "label": "High (good source)", "advice": "This food is a significant source — useful to meet daily needs."}
-    if pct >= 5:
-        return {"pct": pct, "category": "moderate", "label": "Moderate", "advice": "Contributes to daily needs; combine with other foods."}
-    return {"pct": pct, "category": "low", "label": "Low", "advice": "Low — consider adding foods rich in this nutrient."}
-
-# Debug endpoints to test FDC connectivity
-@app.get("/debug_fdc_raw/")
-async def debug_fdc_raw(q: str = "chicken"):
-    apikey = os.environ.get("FDC_API_KEY")
-    if not apikey:
-        return {"ok": False, "error": "FDC_API_KEY not set in this process (env missing).", "env": None}
-    try:
-        res = search_food(q, page_size=1)
-        return {"ok": True, "has_key": True, "result_preview": res if res else None}
-    except Exception as e:
-        return {"ok": False, "error": repr(e)}
-
-@app.get("/debug_fdc_detail/")
-async def debug_fdc_detail(fdcId: int = Query(...)):
-    apikey = os.environ.get("FDC_API_KEY")
-    if not apikey:
-        return {"ok": False, "error": "FDC_API_KEY not set in this process (env: None)."}
-    try:
-        res = get_food_by_fdcid(fdcId)
-        return {"ok": True, "fdcId": fdcId, "detail_snippet": res}
-    except Exception as e:
-        return {"ok": False, "error": repr(e)}
-
-# -------------------
-# Routes (CSV / image / items)
-# -------------------
-@app.post("/analyze/")
-async def analyze(file: UploadFile = File(...)):
-    try:
-        if analyze_orders is None:
-            raise RuntimeError("analyze_orders function not available (check nutrition_utils.py)")
-        file_location = f"/tmp/{file.filename}"
-        with open(file_location, "wb+") as f:
-            shutil.copyfileobj(file.file, f)
-        logger.info("analyze: saved uploaded file to %s", file_location)
-        result = analyze_orders(file_location)
-        return JSONResponse(content=sanitize_for_json(result))
-    except Exception as e:
-        logger.exception("analyze() failed")
-        return json_error("analyze() failed: " + str(e), exc=e)
-
-
-@app.post("/analyze_image/")
-async def analyze_image(file: UploadFile = File(...)):
-    try:
-        img_bytes = await file.read()
-        logger.info("analyze_image: received file %s (%d bytes)", getattr(file, "filename", "<no name>"), len(img_bytes))
-        result = map_items_from_image_bytes(img_bytes, confidence_threshold=80)
-        return JSONResponse(content=sanitize_for_json(result))
-    except Exception as e:
-        logger.exception("analyze_image() failed")
-        return json_error("analyze_image() failed: " + str(e), exc=e)
-
-
-@app.post('/analyze_image_with_micronutrients/')
-async def analyze_image_with_micronutrients(file: UploadFile = File(...),
-                                            include_low_confidence: bool = False,
-                                            dedupe: bool = Query(False)):
-    """
-    Main image -> OCR -> mapping -> FDC lookups -> aggregate micronutrients & macros.
-    Query param dedupe=true will deduplicate identical extracted_text entries before lookup.
-    """
-    try:
-        img_bytes = await file.read()
-        mapping_result = map_items_from_image_bytes(img_bytes, confidence_threshold=80)
-        mapped_items = mapping_result.get("mapped_items", []) or []
-
-        # optional dedupe by normalized extracted_text
-        if dedupe:
-            seen = set()
-            unique = []
-            for m in mapped_items:
-                k = (m.get("extracted_text") or m.get("raw_text") or "").strip().lower()
-                if not k:
-                    continue
-                if k in seen:
-                    continue
-                seen.add(k)
-                unique.append(m)
-            mapped_items = unique
-
-        micronutrient_totals: Dict[str, float] = {}
-        per_item_provenance: List[Dict[str, Any]] = []
-
-        for m in mapped_items:
-            raw_text = m.get("raw_text") or m.get("extracted_text") or ""
-            chosen_name = None
-            provenance = None
-
-            if m.get("best_score", 0) >= 80 and m.get("candidates"):
-                chosen = m["candidates"][0]
-                chosen_name = chosen.get("db_item")
-            else:
-                if include_low_confidence:
-                    chosen_name = m.get("extracted_text")
-
-            if not chosen_name:
-                per_item_provenance.append({"raw": raw_text, "mapped_to": None, "quantity": m.get("quantity", 1), "provenance": {"source": "low_confidence_not_lookup"}})
+            name_trim = (name_raw or "").strip()
+            if not name_trim:
                 continue
 
-            qty = float(m.get("quantity", 1) or 1)
-            portion_mult = float(m.get("portion_mult", 1.0) or 1.0)
-            multiplier = qty * portion_mult
+            try:
+                mult = float(qty) * float(portion_mult)
+            except Exception:
+                mult = 1.0
 
-            nutrients, prov = lookup_food_nutrients(chosen_name)
-            provenance = prov or {"source": "fdc_no_provenance"}
+            # --- 1) LOCAL EXACT/GOOD MATCH ---
+            local = find_local_food(name_trim, threshold=40)  # your lowered threshold
+            if not local:
+                # --- 1b) CLOSEST MATCH (so carbs never 0 for real foods) ---
+                local = _closest_local_food(name_trim, min_score=60)
+                provenance = {"source": "closest_match", "score": local.get("score")} if local else None
+            else:
+                provenance = {"source": "local_cache", "score": local.get("score")}
 
-            if not nutrients:
-                per_item_provenance.append({"raw": raw_text, "mapped_to": chosen_name, "quantity": qty, "provenance": provenance})
+            if local:
+                base = local["nutrients"] or {}
+                scaled = {k: float(v) * mult for k, v in base.items() if _is_number(v)}
+                # accumulate totals
+                for k, v in scaled.items():
+                    totals[k] = totals.get(k, 0.0) + v
+                results.append({
+                    "id": f"item-{i}",
+                    "item": name_trim,
+                    "macros": scaled,
+                    "calories": scaled.get("calories_kcal"),
+                    "quantity": float(qty) if _is_number(qty) else 1.0,
+                    "provenance": provenance or {"source": "local_cache"}
+                })
                 continue
 
-            # canonical macros and scaled nutrients
-            item_macros = compute_item_macros(nutrients)
-            scaled_full = scale_nutrients(nutrients, multiplier)
-            merge_totals(micronutrient_totals, scaled_full)
-            scaled_macros = scale_nutrients(item_macros, multiplier)
-            merge_totals(micronutrient_totals, scaled_macros)
+            # --- 2) GEMINI LLM FALLBACK (if configured) ---
+            if genai and GEMINI_API_KEY:
+                prompt = (
+                    f"Estimate calories and macros for: {name_trim}\n"
+                    "Return JSON: {\"calories\": number, \"protein\": number, \"carbs\": number, \"fats\": number}"
+                )
+                try:
+                    model = genai.GenerativeModel(GEMINI_MODEL)
+                    resp = model.generate_content(prompt)
+                    text = getattr(resp, "text", str(resp))
+                    parsed = json.loads(re.search(r"\{.*\}", text, re.S).group(0))
+                except Exception:
+                    parsed = {}
 
-            # attach serving info to provenance if available
-            prov_with_serving = dict(provenance)
-            if provenance and provenance.get("servingSize"):
-                prov_with_serving["servingSize"] = provenance.get("servingSize")
-                prov_with_serving["servingSizeUnit"] = provenance.get("servingSizeUnit")
-                prov_with_serving["householdServingFullText"] = provenance.get("householdServingFullText")
+                if parsed:
+                    est = {
+                        "calories_kcal": float(parsed.get("calories", 0.0)) * mult,
+                        "protein_g": float(parsed.get("protein", 0.0)) * mult,
+                        # Avoid bogus zeros by clamping to >= 0 (some prompts can return null/negatives)
+                        "total_carbohydrate_g": max(0.0, float(parsed.get("carbs", 0.0)) * mult),
+                        "total_fat_g": max(0.0, float(parsed.get("fats", 0.0)) * mult),
+                    }
+                    for k, v in est.items():
+                        totals[k] = totals.get(k, 0.0) + v
+                    results.append({
+                        "id": f"item-{i}",
+                        "item": name_trim,
+                        "macros": est,
+                        "calories": est.get("calories_kcal"),
+                        "quantity": float(qty) if _is_number(qty) else 1.0,
+                        "provenance": {"source": "llm_fallback"}
+                    })
+                    continue
 
-            per_item_provenance.append({
-                "raw": raw_text,
-                "mapped_to": chosen_name,
-                "quantity": qty,
-                "portion_mult": portion_mult,
-                "provenance": prov_with_serving
+            # --- 3) HEURISTIC FALLBACK ---
+            base = 350.0
+            low = name_trim.lower()
+            if "salad" in low:
+                base = 220
+            elif "biryani" in low:
+                base = 420
+            elif "pizza" in low:
+                base = 700
+            elif "paneer" in low:
+                base = 450
+
+            est = {
+                "calories_kcal": base * mult,
+                # rough macro shares; clamp ≥ 0
+                "protein_g": max(0.0, (base * 0.12 / 4) * mult),
+                "total_carbohydrate_g": max(0.0, (base * 0.45 / 4) * mult),
+                "total_fat_g": max(0.0, (base * 0.43 / 9) * mult),
+            }
+            for k, v in est.items():
+                totals[k] = totals.get(k, 0.0) + v
+            results.append({
+                "id": f"item-{i}",
+                "item": name_trim,
+                "macros": est,
+                "calories": est.get("calories_kcal"),
+                "quantity": float(qty) if _is_number(qty) else 1.0,
+                "provenance": {"source": "heuristic"}
             })
 
-        macros_summary = build_macros_summary_from_totals(micronutrient_totals)
-        percent_dv = compute_percent_dv(micronutrient_totals)
-        percent_dv_friendly = {k: classify_percent_dv(v) for k, v in (percent_dv or {}).items()}
-        # top_lacking: nutrients with numeric %DV, sorted ascending (lowest first)
-        top_lacking = sorted([(k, v) for k, v in (percent_dv or {}).items() if v is not None], key=lambda x: x[1])[:8]
-
-        resp = {
-            "mapping_result": mapping_result,
-            "per_item_provenance": per_item_provenance,
-            "micronutrient_totals": micronutrient_totals,
-            "percent_dv": percent_dv,
-            "percent_dv_friendly": percent_dv_friendly,
-            "top_lacking": top_lacking,
-            "macros_summary": macros_summary,
-            "macros_source": "fdc_aggregated"
+        macros = {
+            "total_calories": round(totals.get("calories_kcal", 0.0), 1),
+            "total_protein": round(totals.get("protein_g", 0.0), 1),
+            "total_carbs": round(totals.get("total_carbohydrate_g", 0.0), 1),
+            "total_fat": round(totals.get("total_fat_g", 0.0), 1),
         }
-        return JSONResponse(content=sanitize_for_json(resp))
+        return JSONResponse(content={"results": results, "totals": totals, "macros": macros})
+
     except Exception as e:
-        logger.exception("analyze_image_with_micronutrients() failed")
-        return json_error("analyze_image_with_micronutrients() failed: " + str(e), exc=e)
+        logger.exception("run_nutrients failed")
+        return json_error("run_nutrients failed", e)
 
+# === Local search ===
+@app.get("/api/food/search_local")
+def search_local_foods(q: str):
+    qn = _normalize_name(q)
+    matches = [f for f in LOCAL_FOOD_CACHE if qn in f["norm"]][:15]
+    return [{"name": f["name"], **f["nutrients"]} for f in matches]
 
-@app.post("/analyze_items/")
-async def analyze_items(payload: Dict[str, Any] = Body(...)):
-    """
-    Accepts confirmed items from the UI and returns FDC-based aggregation.
-      payload: {"confirmed": [{"item": <name>, "quantity": <float>, "portion_mult": <float?>, "calories": <manual?>}, ...]}
-    Manual calories are honored when FDC data is missing.
-    """
-    try:
-        confirmed = payload.get("confirmed", []) or []
-        micronutrient_totals: Dict[str, float] = {}
-        per_item_provenance: List[Dict[str, Any]] = []
+@app.get("/ping")
+def ping():
+    return {"ok": True}
 
-        for c in confirmed:
-            name = (c.get("item") or "").strip()
-            if not name:
-                continue
-            qty = float(c.get("quantity", 1.0) or 1.0)
-            portion_mult = float(c.get("portion_mult", 1.0) or 1.0)
-            multiplier = qty * portion_mult
-            manual_cal = c.get("calories") or c.get("manual_calories")
+# === DB ===
+Base = declarative_base()
+DB_PATH = os.getenv("FOOD_DB_PATH", "sqlite:///food_app.db")
+engine = create_engine(DB_PATH, connect_args={"check_same_thread": False})
+SessionLocal = sessionmaker(bind=engine)
 
-            nutrients, provenance = lookup_food_nutrients(name)
+class MealLog(Base):
+    __tablename__ = "meal_logs"
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer)
+    item_name = Column(String)
+    nutrients = Column(JSON)
+    timestamp = Column(DateTime, default=datetime.datetime.utcnow)
 
-            if not nutrients and manual_cal is None:
-                per_item_provenance.append({"raw": name, "mapped_to": None, "quantity": qty, "provenance": {"source": "fdc_no_data"}})
-                continue
+Base.metadata.create_all(bind=engine)
 
-            if nutrients:
-                scaled_full = scale_nutrients(nutrients, multiplier)
-                merge_totals(micronutrient_totals, scaled_full)
-                item_macros = compute_item_macros(nutrients)
-                scaled_macros = scale_nutrients(item_macros, multiplier)
-                merge_totals(micronutrient_totals, scaled_macros)
-                prov = dict(provenance or {})
-                if prov.get("servingSize"):
-                    prov["servingSize"] = prov.get("servingSize")
-                    prov["servingSizeUnit"] = prov.get("servingSizeUnit")
-                    prov["householdServingFullText"] = prov.get("householdServingFullText")
-                per_item_provenance.append({"raw": name, "mapped_to": name, "quantity": qty, "portion_mult": portion_mult, "provenance": prov})
-            else:
-                try:
-                    v = float(manual_cal)
-                    micronutrient_totals["calories_kcal"] = micronutrient_totals.get("calories_kcal", 0.0) + v * multiplier
-                except Exception:
-                    pass
-                per_item_provenance.append({"raw": name, "mapped_to": name, "quantity": qty, "provenance": {"source": "manual_calories"}})
+@app.get("/api/analytics/summary")
+def summary(user_id: int, db: SessionLocal = Depends(SessionLocal)):
+    logs = db.query(MealLog).filter(MealLog.user_id == user_id).all()
+    total = {}
+    for l in logs:
+        for k,v in (l.nutrients or {}).items():
+            if _is_number(v): total[k]=total.get(k,0)+float(v)
+    macros = {
+        "total_calories": total.get("calories_kcal",0),
+        "total_protein": total.get("protein_g",0),
+        "total_carbs": total.get("total_carbohydrate_g",0),
+        "total_fat": total.get("total_fat_g",0),
+    }
+    return {"totals": total, "macros": macros}
 
-        macros_summary = build_macros_summary_from_totals(micronutrient_totals)
-        percent_dv = compute_percent_dv(micronutrient_totals)
-        percent_dv_friendly = {k: classify_percent_dv(v) for k, v in (percent_dv or {}).items()}
-        top_lacking = sorted([(k, v) for k, v in (percent_dv or {}).items() if v is not None], key=lambda x: x[1])[:8]
+# ============================================================
+# ✅ NEW: AI-Summary compatible endpoint (dummy logic)
+# ============================================================
+# ============================================================
+# ✅ Personalized, non-LLM Daily Summary
+# ============================================================
+_summary_jobs = {}
 
-        resp = {
-            "per_item_provenance": per_item_provenance,
-            "micronutrient_totals": micronutrient_totals,
-            "macros_summary": macros_summary,
-            "percent_dv": percent_dv,
-            "percent_dv_friendly": percent_dv_friendly,
-            "top_lacking": top_lacking
-        }
-        return JSONResponse(content=sanitize_for_json(resp))
-    except Exception as e:
-        logger.exception("analyze_items() failed")
-        return json_error("analyze_items() failed: " + str(e), exc=e)
+def _bmr_msj(sex: str, age: float, height_cm: float, weight_kg: float) -> float:
+    # Mifflin–St Jeor
+    s = 5 if (sex or "").lower().startswith("m") else -161
+    return 10*weight_kg + 6.25*height_cm - 5*age + s
 
+def _activity_mult(level: str) -> float:
+    m = {
+        "sedentary": 1.2,
+        "light": 1.375,
+        "moderate": 1.55,
+        "very": 1.725,
+        "extra": 1.9,
+    }
+    return m.get((level or "light").lower(), 1.375)
 
-# small ping
-@app.get('/ping/')
-async def ping():
-    return {"ok": True, "msg": "pong"}
+def _targets_from_profile(p: dict) -> dict:
+    # Sensible defaults if profile missing
+    sex = p.get("sex", "male")
+    age = float(p.get("age", 25))
+    height_cm = float(p.get("height_cm", 170))
+    weight_kg = float(p.get("weight_kg", 70))
+    activity = p.get("activity_level", "light")  # sedentary/light/moderate/very/extra
+    goal = (p.get("goal", "maintain") or "maintain").lower()  # cut/maintain/bulk
+
+    bmr = _bmr_msj(sex, age, height_cm, weight_kg)
+    tdee = bmr * _activity_mult(activity)
+
+    # Calorie target from goal
+    if goal in ("cut", "fatloss", "weight loss", "lose"):
+        cal_target = tdee - 400
+    elif goal in ("bulk", "gain", "muscle gain"):
+        cal_target = tdee + 300
+    else:
+        cal_target = tdee
+
+    # Macro targets: Protein 1.6 g/kg (cut: 1.8, bulk: 1.6), Fat 0.8 g/kg, rest carbs
+    prot_per_kg = 1.8 if goal in ("cut", "fatloss", "weight loss", "lose") else 1.6
+    protein_g = round(prot_per_kg * weight_kg, 0)
+    fat_g = round(0.8 * weight_kg, 0)
+    # kcal from P/F; carbs get the rest (4/4/9 rule)
+    kcal_pf = protein_g*4 + fat_g*9
+    carb_g = max(0, round((cal_target - kcal_pf) / 4, 0))
+
+    return {
+        "bmr": round(bmr),
+        "tdee": round(tdee),
+        "calorie_target": max(1200, round(cal_target)),
+        "protein_target_g": protein_g,
+        "fat_target_g": fat_g,
+        "carb_target_g": carb_g,
+        "goal": goal,
+        "activity_level": activity,
+        "weight_kg": weight_kg,
+        "height_cm": height_cm,
+        "age": age,
+        "sex": sex,
+    }
+
+def _sum_logs(logs: list) -> dict:
+    tot = {"calories": 0.0, "protein_g": 0.0, "carbs_g": 0.0, "fats_g": 0.0}
+    meals_out = []
+    for l in logs or []:
+        name = l.get("item") or l.get("name") or "Meal"
+        cal = float(l.get("calories") or 0)
+        # Allow logs to include a nested macros object or flat g values
+        m = l.get("macros") or {}
+        prot = float(m.get("protein_g") or l.get("protein_g") or 0)
+        carbs = float(m.get("carbs_g") or m.get("total_carbohydrate_g") or l.get("carbs_g") or 0)
+        fats = float(m.get("fats_g") or m.get("total_fat_g") or l.get("fats_g") or 0)
+
+        tot["calories"] += cal
+        tot["protein_g"] += prot
+        tot["carbs_g"] += carbs
+        tot["fats_g"] += fats
+        meals_out.append({
+            "item": name,
+            "calories": round(cal),
+            "protein_g": round(prot, 1),
+            "carbs_g": round(carbs, 1),
+            "fats_g": round(fats, 1),
+        })
+    # round totals
+    for k in tot: tot[k] = round(tot[k], 1)
+    return {"totals": tot, "meals": meals_out}
+
+def _make_recommendations(tot: dict, targets: dict) -> list:
+    recs = []
+    # Calorie guidance
+    cal_gap = round(tot["calories"] - targets["calorie_target"])
+    if cal_gap > 150:
+        recs.append(f"Calories {cal_gap} kcal over target — trim portion size at dinner or swap a sugary drink for water.")
+    elif cal_gap < -150:
+        recs.append(f"Calories {abs(cal_gap)} kcal under target — add a snack (e.g., yogurt + fruit) or increase carbs at lunch.")
+
+    # Protein
+    p_gap = round(targets["protein_target_g"] - tot["protein_g"])
+    if p_gap > 15:
+        recs.append(f"Protein is low by ~{p_gap} g — add eggs, paneer, dal, chicken, or Greek yogurt.")
+    # Carbs/Fats soft checks
+    if tot["carbs_g"] > targets["carb_target_g"] + 40:
+        recs.append("Carbs were quite high — consider switching one refined-carb item to legumes/veggies.")
+    if tot["fats_g"] > targets["fat_target_g"] + 20:
+        recs.append("Fats were high — reduce fried/oily items; prefer nuts/seeds in measured portions.")
+
+    if not recs:
+        recs.append("Great balance today — keep portions steady and prioritize whole foods.")
+    return recs
+
+def _personalized_summary_job(user_id: str, date: str, logs: List[dict], profile: Optional[dict]):
+    # 1) derive targets
+    targets = _targets_from_profile(profile or {})
+    # 2) sum the day
+    agg = _sum_logs(logs)
+    totals = agg["totals"]
+    meals = agg["meals"]
+
+    # 3) gaps
+    gaps = {
+        "calories_gap": round(totals["calories"] - targets["calorie_target"]),
+        "protein_gap_g": round(totals["protein_g"] - targets["protein_target_g"]),
+        "carb_gap_g": round(totals["carbs_g"] - targets["carb_target_g"]),
+        "fat_gap_g": round(totals["fats_g"] - targets["fat_target_g"]),
+    }
+
+    # 4) simple ranking
+    top_meals = sorted(meals, key=lambda x: x["calories"], reverse=True)[:3]
+
+    # 5) recs
+    recs = _make_recommendations(totals, targets)
+
+    parsed = {
+        "date": date,
+        "profile_used": targets,
+        "totals": totals,
+        "gaps_vs_target": gaps,
+        "top_meals_by_cal": top_meals,
+        "recommendations": recs,
+        "generated_at": datetime.datetime.utcnow().isoformat()+"Z"
+    }
+
+    _summary_jobs[(user_id, date)] = {
+        "status": "complete",
+        "summary": {
+            "parsed": parsed,
+            "totals": {"calories_kcal": totals["calories"]},
+        },
+    }
+
+@app.post("/api/summarizeDaily")
+def start_summary(data: dict, bg: BackgroundTasks):
+    user = data.get("user_id")
+    date = data.get("date") 
+    logs = data.get("logs", [])
+    profile = data.get("profile", {})  # <-- optional, but enables personalization
+    if not user or not date:
+        raise HTTPException(400, "user_id & date required")
+    _summary_jobs[(user, date)] = {"status": "pending"}
+    bg.add_task(_personalized_summary_job, user, date, logs, profile)
+    return {"status": "queued"}
+
+@app.get("/api/summarizeDaily/status")
+def status_summary(user_id: str, date: str):
+    job = _summary_jobs.get((user_id, date))
+    if not job:
+        return {"status": "pending"}
+    return job
