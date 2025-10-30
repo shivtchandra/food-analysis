@@ -1,0 +1,11 @@
+fastapi
+uvicorn[standard]
+python-dotenv
+requests
+easyocr
+pillow
+opencv-python-headless
+numpy>=1.23,<2.0
+pandas
+pytesseract
+rapidfuzz
